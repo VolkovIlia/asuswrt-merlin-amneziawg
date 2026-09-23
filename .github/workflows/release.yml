@@ -61,9 +61,13 @@ env:
   # replies; local-only). v3.1.20260814 is the one to pin: .12 introduced the features, .14 fixes
   # a slice-cap typo in SendHandshakeCookie that runtime-panics when RandomTrailers is on and a
   # cookie reply fires. Reproducible, not floating master.
-  AWG_GO_TAG: v3.1.20260814
-  AWG_GO_REPO: https://github.com/william-aqn/amneziawg-go.git
-  AWG_GO_REF: router-build-v31
+  # Since 1.5.23 the modern track follows v3.1.20260828 (same client daemon line as Amnezia
+  # 5.0.3.0 plus two upstream send/receive fixes: udp-window RandomPaddingAddition and a full
+  # underload bypass under DisableCookies). The three router patches were cherry-picked onto it
+  # cleanly as branch router-build-v31-0828 in the VolkovIlia fork.
+  AWG_GO_TAG: v3.1.20260828
+  AWG_GO_REPO: https://github.com/VolkovIlia/amneziawg-go.git
+  AWG_GO_REF: router-build-v31-0828
   # armv7-2.6 (kernel 2.6.3x — RT-AC68U / RT-AC66U_B1 class) is pinned SEPARATELY since 1.5.9.
   # Go >= 1.24 supports only Linux >= 3.2, so that package is built by its own step with a pinned
   # Go 1.23 toolchain plus dependency downgrades and an Outline SDK drop. Giving it its own
