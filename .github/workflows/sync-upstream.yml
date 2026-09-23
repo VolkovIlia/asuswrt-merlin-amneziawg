@@ -1,0 +1,37 @@
+name: Sync upstream
+
+# Daily: pull new releases of the addon (william-aqn), amneziawg-go and amneziawg-tools
+# (amnezia-vpn), re-apply this fork's patches (fork/patches), bump the version, tag and
+# dispatch release.yml. Routers on this fork then self-update (awg_self_update cron).
+# All logic lives in fork/sync.sh; a failed patch/build opens an issue and releases nothing.
+
+on:
+  schedule:
+    - cron: '0 3 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  issues: write
+  actions: write
+
+concurrency:
+  group: sync-upstream
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: 'stable'
+
+      - name: Sync and release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: sh fork/sync.sh

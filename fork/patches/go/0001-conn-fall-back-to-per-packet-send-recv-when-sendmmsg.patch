@@ -1,0 +1,141 @@
+From aa730c115652fce72e92cb5bb27eaf9b08f2ac55 Mon Sep 17 00:00:00 2001
+From: william-aqn <dark.crimson.d.c.r.m@gmail.com>
+Date: Sun, 12 Jul 2026 23:20:55 +0300
+Subject: [PATCH 1/3] conn: fall back to per-packet send/recv when
+ sendmmsg/recvmmsg are ENOSYS
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+wireguard-go/amneziawg-go's StdNetBind uses ipv{4,6}.PacketConn WriteBatch/
+ReadBatch (sendmmsg/recvmmsg) on Linux for batched UDP I/O. Those syscalls were
+added in Linux 3.0; on older kernels still shipped by some routers (e.g. Broadcom
+BCM470x / RT-AC68U on 2.6.36) they return ENOSYS, so the tunnel could form
+handshakes but not send or receive a single packet — it came up and never
+handshaked, on any config.
+
+Detect ENOSYS from the first WriteBatch/ReadBatch, set a sticky per-bind flag,
+and fall back to the per-packet WriteMsgUDP/ReadMsgUDP path the non-Linux branch
+already uses. No effect on kernels >= 3.0 (the flag never trips). Builds on
+linux/windows/darwin; conn tests pass.
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+---
+ conn/bind_std.go | 60 +++++++++++++++++++++++++++++++++---------------
+ 1 file changed, 42 insertions(+), 18 deletions(-)
+
+diff --git a/conn/bind_std.go b/conn/bind_std.go
+index 6908ba8..1495688 100644
+--- a/conn/bind_std.go
++++ b/conn/bind_std.go
+@@ -14,6 +14,7 @@ import (
+ 	"runtime"
+ 	"strconv"
+ 	"sync"
++	"sync/atomic"
+ 	"syscall"
+ 
+ 	"golang.org/x/net/ipv4"
+@@ -40,6 +41,14 @@ type StdNetBind struct {
+ 	ipv6TxOffload bool
+ 	ipv6RxOffload bool
+ 
++	// batchUnsupported is set the first time WriteBatch/ReadBatch fails with
++	// ENOSYS — i.e. the kernel has no sendmmsg/recvmmsg (added in Linux 3.0).
++	// Some routers still run older kernels (e.g. Broadcom BCM470x on 2.6.36),
++	// where the batch syscalls return ENOSYS and the tunnel could not send or
++	// receive a single packet. Once set, Send/receiveIP use the per-packet
++	// WriteMsgUDP/ReadMsgUDP path (as the non-Linux branch already does).
++	batchUnsupported atomic.Bool
++
+ 	// these two fields are not guarded by mu
+ 	udpAddrPool sync.Pool
+ 	msgsPool    sync.Pool
+@@ -238,24 +247,25 @@ func (s *StdNetBind) receiveIP(
+ 	}
+ 	defer s.putMessages(msgs)
+ 	var numMsgs int
+-	if runtime.GOOS == "linux" || runtime.GOOS == "android" {
++	if s.useBatch() {
+ 		if rxOffload {
+ 			readAt := len(*msgs) - (IdealBatchSize / udpSegmentMaxDatagrams)
+ 			numMsgs, err = br.ReadBatch((*msgs)[readAt:], 0)
+-			if err != nil {
+-				return 0, err
+-			}
+-			numMsgs, err = splitCoalescedMessages(*msgs, readAt, getGSOSize)
+-			if err != nil {
+-				return 0, err
++			if err == nil {
++				numMsgs, err = splitCoalescedMessages(*msgs, readAt, getGSOSize)
+ 			}
+ 		} else {
+ 			numMsgs, err = br.ReadBatch(*msgs, 0)
+-			if err != nil {
+-				return 0, err
+-			}
+ 		}
+-	} else {
++		if errors.Is(err, syscall.ENOSYS) {
++			// The kernel has no recvmmsg (pre-3.0); disable batching permanently
++			// and fall through to the per-packet read below.
++			s.batchUnsupported.Store(true)
++		} else if err != nil {
++			return 0, err
++		}
++	}
++	if !s.useBatch() {
+ 		msg := &(*msgs)[0]
+ 		msg.N, msg.NN, _, msg.Addr, err = conn.ReadMsgUDP(msg.Buffers[0], msg.OOB)
+ 		if err != nil {
+@@ -409,13 +419,21 @@ retry:
+ 	return err
+ }
+ 
++// useBatch reports whether the batched sendmmsg/recvmmsg path (via
++// ipv{4,6}.PacketConn) should be used. It is only available on Linux/Android, and
++// is disabled for the lifetime of the bind once the kernel is found to lack the
++// batch syscalls (ENOSYS, pre-Linux-3.0 — see batchUnsupported).
++func (s *StdNetBind) useBatch() bool {
++	return (runtime.GOOS == "linux" || runtime.GOOS == "android") && !s.batchUnsupported.Load()
++}
++
+ func (s *StdNetBind) send(conn *net.UDPConn, pc batchWriter, msgs []ipv6.Message) error {
+ 	var (
+ 		n     int
+ 		err   error
+ 		start int
+ 	)
+-	if runtime.GOOS == "linux" || runtime.GOOS == "android" {
++	if s.useBatch() {
+ 		for {
+ 			n, err = pc.WriteBatch(msgs[start:], 0)
+ 			if err != nil || n == len(msgs[start:]) {
+@@ -423,12 +441,18 @@ func (s *StdNetBind) send(conn *net.UDPConn, pc batchWriter, msgs []ipv6.Message
+ 			}
+ 			start += n
+ 		}
+-	} else {
+-		for _, msg := range msgs {
+-			_, _, err = conn.WriteMsgUDP(msg.Buffers[0], msg.OOB, msg.Addr.(*net.UDPAddr))
+-			if err != nil {
+-				break
+-			}
++		if !errors.Is(err, syscall.ENOSYS) {
++			return err
++		}
++		// The kernel has no sendmmsg (pre-3.0). ENOSYS is returned on the first
++		// call, so no datagrams were sent; disable batching permanently and fall
++		// through to the per-packet path below.
++		s.batchUnsupported.Store(true)
++	}
++	for _, msg := range msgs {
++		_, _, err = conn.WriteMsgUDP(msg.Buffers[0], msg.OOB, msg.Addr.(*net.UDPAddr))
++		if err != nil {
++			break
+ 		}
+ 	}
+ 	return err
+-- 
+2.55.0
+

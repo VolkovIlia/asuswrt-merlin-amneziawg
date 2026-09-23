@@ -1,0 +1,174 @@
+From b71e03ee02213b1ee5ad0c63c3728db9d380c0c4 Mon Sep 17 00:00:00 2001
+From: william-aqn <dark.crimson.d.c.r.m@gmail.com>
+Date: Sun, 12 Jul 2026 16:45:07 +0300
+Subject: [PATCH 3/3] feat: make PreallocatedBuffersPerPool configurable at
+ runtime
+
+On memory-constrained hosts (consumer routers with 256-512 MB of RAM)
+the Linux default of PreallocatedBuffersPerPool = 0 lets the receive
+path allocate 64 KiB message buffers without bound whenever sustained
+inbound traffic outpaces the (software) crypto pipeline. Field case:
+an ASUS RT-AX82U (512 MB, armv7) running the standalone daemon dies
+with `fatal error: runtime: out of memory` a few minutes into any
+sustained stream, allocation stack in
+RoutineReceiveIncoming -> GetMessageBuffer -> WaitPool.Get.
+Rebuilding with the pool bounded at 1024 (the value the ios profile
+already ships) fixes it: WaitPool.Get blocks the receiver when the
+pool is full, the kernel drops excess UDP, and peers treat that as
+ordinary congestion.
+
+Make the bound adjustable without patching the source:
+
+- turn PreallocatedBuffersPerPool into a typed var on the default,
+  android and windows profiles; ios already declares it as a var for
+  exactly this reason. Platform defaults are unchanged.
+- the standalone daemon reads WG_PREALLOCATED_BUFFERS_PER_POOL from
+  the environment (same configuration surface as LOG_LEVEL and
+  WG_PROCESS_FOREGROUND) before creating the device; unset keeps the
+  platform default, 0 means unbounded, and a non-numeric value fails
+  startup with a clear error.
+- embedders using the device package directly can assign
+  device.PreallocatedBuffersPerPool before calling NewDevice.
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+---
+ README.md                        |  2 ++
+ device/queueconstants_android.go | 15 +++++++++------
+ device/queueconstants_default.go | 21 +++++++++++++++------
+ device/queueconstants_windows.go | 16 ++++++++++------
+ main.go                          | 20 +++++++++++++++++---
+ 5 files changed, 53 insertions(+), 21 deletions(-)
+
+diff --git a/README.md b/README.md
+index 84dfd36..b4731fe 100644
+--- a/README.md
++++ b/README.md
+@@ -25,6 +25,8 @@ When an interface is running, you may use [`amneziawg-tools `](https://github.co
+ 
+ To run with more logging you may set the environment variable `LOG_LEVEL=debug`.
+ 
++On memory-constrained hosts (e.g. consumer routers with 256–512 MB of RAM) you may bound the internal buffer pools by setting the environment variable `WG_PREALLOCATED_BUFFERS_PER_POOL=1024`. When the bound is reached the receive path waits for a free buffer instead of allocating a new one, so sustained traffic bursts no longer grow the heap without limit (the kernel drops excess UDP, which peers handle as ordinary congestion). The default (`0` on Linux) keeps the historical unbounded behavior; embedders using the `device` package directly can assign `device.PreallocatedBuffersPerPool` before calling `NewDevice`.
++
+ ## Platforms
+ 
+ ### Linux
+diff --git a/device/queueconstants_android.go b/device/queueconstants_android.go
+index 88662c2..fff7c5c 100644
+--- a/device/queueconstants_android.go
++++ b/device/queueconstants_android.go
+@@ -10,10 +10,13 @@ import "github.com/amnezia-vpn/amneziawg-go/v3/conn"
+ /* Reduce memory consumption for Android */
+ 
+ const (
+-	QueueStagedSize            = conn.IdealBatchSize
+-	QueueOutboundSize          = 1024
+-	QueueInboundSize           = 1024
+-	QueueHandshakeSize         = 1024
+-	MaxSegmentSize             = (1 << 16) - 1 // largest possible UDP datagram
+-	PreallocatedBuffersPerPool = 4096
++	QueueStagedSize    = conn.IdealBatchSize
++	QueueOutboundSize  = 1024
++	QueueInboundSize   = 1024
++	QueueHandshakeSize = 1024
++	MaxSegmentSize     = (1 << 16) - 1 // largest possible UDP datagram
+ )
++
++// A var instead of a const (like on ios) so embedders can adjust the bound
++// to their memory budget before calling NewDevice.
++var PreallocatedBuffersPerPool uint32 = 4096
+diff --git a/device/queueconstants_default.go b/device/queueconstants_default.go
+index 8087829..3447bad 100644
+--- a/device/queueconstants_default.go
++++ b/device/queueconstants_default.go
+@@ -10,10 +10,19 @@ package device
+ import "github.com/amnezia-vpn/amneziawg-go/v3/conn"
+ 
+ const (
+-	QueueStagedSize            = conn.IdealBatchSize
+-	QueueOutboundSize          = 1024
+-	QueueInboundSize           = 1024
+-	QueueHandshakeSize         = 1024
+-	MaxSegmentSize             = (1 << 16) - 1 // largest possible UDP datagram
+-	PreallocatedBuffersPerPool = 1024          // bounded (upstream iOS/Windows profile): backpressure instead of OOM on low-RAM routers
++	QueueStagedSize    = conn.IdealBatchSize
++	QueueOutboundSize  = 1024
++	QueueInboundSize   = 1024
++	QueueHandshakeSize = 1024
++	MaxSegmentSize     = (1 << 16) - 1 // largest possible UDP datagram
+ )
++
++// PreallocatedBuffersPerPool is a var instead of a const (like on ios), so that
++// memory-constrained hosts — e.g. consumer routers running the standalone daemon —
++// can bound the buffer pools without patching the source. Assign it before calling
++// NewDevice (the daemon reads WG_PREALLOCATED_BUFFERS_PER_POOL from the environment;
++// 0 means unbounded — upstream's stock Linux behavior).
++// router-build default: bounded at 1024 (upstream's iOS/Windows profile) — WaitPool.Get
++// gives real backpressure instead of `runtime: out of memory` under sustained inbound
++// on low-RAM routers; high-RAM boxes get 0 from their launcher for full throughput.
++var PreallocatedBuffersPerPool uint32 = 1024
+diff --git a/device/queueconstants_windows.go b/device/queueconstants_windows.go
+index 9a296d6..8731c54 100644
+--- a/device/queueconstants_windows.go
++++ b/device/queueconstants_windows.go
+@@ -6,10 +6,14 @@
+ package device
+ 
+ const (
+-	QueueStagedSize            = 128
+-	QueueOutboundSize          = 1024
+-	QueueInboundSize           = 1024
+-	QueueHandshakeSize         = 1024
+-	MaxSegmentSize             = 2048 - 32 // largest possible UDP datagram
+-	PreallocatedBuffersPerPool = 0         // Disable and allow for infinite memory growth
++	QueueStagedSize    = 128
++	QueueOutboundSize  = 1024
++	QueueInboundSize   = 1024
++	QueueHandshakeSize = 1024
++	MaxSegmentSize     = 2048 - 32 // largest possible UDP datagram
+ )
++
++// A var instead of a const (like on ios) so embedders can adjust the bound
++// to their memory budget before calling NewDevice.
++// 0 keeps the default behavior: disable and allow for infinite memory growth.
++var PreallocatedBuffersPerPool uint32 = 0
+diff --git a/main.go b/main.go
+index b0d479c..e0de036 100644
+--- a/main.go
++++ b/main.go
+@@ -27,9 +27,10 @@ const (
+ )
+ 
+ const (
+-	ENV_WG_TUN_FD             = "WG_TUN_FD"
+-	ENV_WG_UAPI_FD            = "WG_UAPI_FD"
+-	ENV_WG_PROCESS_FOREGROUND = "WG_PROCESS_FOREGROUND"
++	ENV_WG_TUN_FD                        = "WG_TUN_FD"
++	ENV_WG_UAPI_FD                       = "WG_UAPI_FD"
++	ENV_WG_PROCESS_FOREGROUND            = "WG_PROCESS_FOREGROUND"
++	ENV_WG_PREALLOCATED_BUFFERS_PER_POOL = "WG_PREALLOCATED_BUFFERS_PER_POOL"
+ )
+ 
+ func printUsage() {
+@@ -152,6 +153,19 @@ func main() {
+ 		os.Exit(ExitSetupFailed)
+ 	}
+ 
++	// optionally bound the buffer pools (must happen before the device is
++	// created; the default is the platform profile in device/queueconstants_*.go)
++
++	if poolSizeStr := os.Getenv(ENV_WG_PREALLOCATED_BUFFERS_PER_POOL); poolSizeStr != "" {
++		poolSize, err := strconv.ParseUint(poolSizeStr, 10, 32)
++		if err != nil {
++			logger.Errorf("Invalid %s: %v", ENV_WG_PREALLOCATED_BUFFERS_PER_POOL, err)
++			os.Exit(ExitSetupFailed)
++		}
++		device.PreallocatedBuffersPerPool = uint32(poolSize)
++		logger.Verbosef("Buffer pools bounded at %d buffers each", poolSize)
++	}
++
+ 	// open UAPI file (or use supplied fd)
+ 
+ 	fileUAPI, err := func() (*os.File, error) {
+-- 
+2.55.0
+

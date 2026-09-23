@@ -18,7 +18,7 @@ on:
 permissions:
   contents: write
 
-env:
+# Build pins: see fork/pins.env (loaded by the "Load fork pins" step).
   # amneziawg-tools (awg) release tag — the static-musl awg CLI is built from this tag.
   # AmneziaWG 3.0 support used to live ONLY on the unmerged feat/awg3 branch, so 1.5.0-1.5.6 had
   # to pin it by SHA (05434cab…) and 1.5.7 retreated to the last 2.0 release tag. Both are
@@ -35,7 +35,7 @@ env:
   # "on"/"off") to config.c + CLI + show/showconf, and appends 2 more columns (on/off) to the
   # `awg show <if> dump` INTERFACE line — still before fwmark, and our consumers still skip
   # that line, so the 3.0 note above keeps holding.
-  AWG_TOOLS_TAG: v3.1.20260812
+  # AWG_TOOLS_TAG lives in fork/pins.env (bumped by sync-upstream.yml).
   # amneziawg-go (daemon) — built from OUR FORK, not upstream, until upstream merges the
   # patches the router build needs (all carried as real commits on the fork branch below):
   #   1. bounded buffer pool (PreallocatedBuffersPerPool, router default 1024) — the fix for
@@ -65,9 +65,9 @@ env:
   # 5.0.3.0 plus two upstream send/receive fixes: udp-window RandomPaddingAddition and a full
   # underload bypass under DisableCookies). The three router patches were cherry-picked onto it
   # cleanly as branch router-build-v31-0828 in the VolkovIlia fork.
-  AWG_GO_TAG: v3.1.20260828
-  AWG_GO_REPO: https://github.com/VolkovIlia/amneziawg-go.git
-  AWG_GO_REF: router-build-v31-0828
+  # AWG_GO_TAG / AWG_GO_REPO / AWG_GO_REF live in fork/pins.env (bumped by sync-upstream.yml).
+  # The modern track clones OFFICIAL amnezia-vpn/amneziawg-go at AWG_GO_TAG and applies
+  # fork/patches/go/*.patch (the three router patches) — no separate daemon fork to rebase.
   # armv7-2.6 (kernel 2.6.3x — RT-AC68U / RT-AC66U_B1 class) is pinned SEPARATELY since 1.5.9.
   # Go >= 1.24 supports only Linux >= 3.2, so that package is built by its own step with a pinned
   # Go 1.23 toolchain plus dependency downgrades and an Outline SDK drop. Giving it its own
@@ -81,9 +81,7 @@ env:
   # ENOSYS), so there is no reason to keep that package a protocol version behind. v3.1 keeps
   # go.mod untouched, and the full legacy recipe (Outline drop + x/* downgrades + go1.23.12
   # GOARM=5 build) was re-verified locally against router-build-v31 before moving this pin.
-  AWG_GO_TAG_LEGACY: v3.1.20260814
-  AWG_GO_REPO_LEGACY: https://github.com/william-aqn/amneziawg-go.git
-  AWG_GO_REF_LEGACY: router-build-v31
+  # AWG_GO_*_LEGACY live in fork/pins.env (held at the verified legacy branch).
 
 jobs:
   build:
@@ -91,6 +89,9 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Load fork pins
+        run: grep -E '^[A-Z_]+=' fork/pins.env >> "$GITHUB_ENV"
 
       - name: Set up QEMU (ARM emulation for the static-musl awg build)
         uses: docker/setup-qemu-action@v3
@@ -104,6 +105,9 @@ jobs:
         run: |
           set -eux
           git clone --depth 1 --branch "$AWG_GO_REF" "$AWG_GO_REPO" amneziawg-go
+          # Router patches ride on top of the official tag (fork/patches/go, kept current by
+          # sync-upstream.yml, which refuses to bump a tag they no longer apply to).
+          git -C amneziawg-go apply --verbose "$GITHUB_WORKSPACE"/fork/patches/go/*.patch
           AWG_GO_COMMIT=$(git -C amneziawg-go rev-parse --short HEAD)
           echo "amneziawg-go: $AWG_GO_REPO ref $AWG_GO_REF (based on $AWG_GO_TAG) commit: $AWG_GO_COMMIT"
           # `Version` is a `const` in version.go, so `-ldflags -X main.Version=` can't override it
