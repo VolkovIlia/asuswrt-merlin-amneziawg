@@ -5,6 +5,7 @@
 # =============================================================
 
 AWG_VERSION="1.5.23"
+AWG_REPO="VolkovIlia/asuswrt-merlin-amneziawg"
 ADDON_DIR="/jffs/addons/amneziawg"
 AWG_DIR="/opt/amneziawg"
 CONF="$AWG_DIR/awg0.conf"
@@ -3305,6 +3306,7 @@ setup_firewall(){
         cru a awg_geo_update "0 4 * * * '$ADDON_DIR/amneziawg.sh' update_geo"
     fi
     cru a awg_watchdog "*/5 * * * * '$ADDON_DIR/amneziawg.sh' watchdog"
+    ensure_self_update_cron
     # Background status refresh (every minute) so the UI peer table — handshake age and the
     # cumulative RX/TX counters — stays current WITHOUT a user action. The web page only re-reads
     # the static awg_status.htm; nothing else regenerated it between actions, so it used to freeze.
@@ -4701,6 +4703,7 @@ do_boot_guard(){
         echo "stand down: no /opt/etc/init.d/S99amneziawg after ${waited}s (Entware not mounted or package removed)" > "$BOOT_GUARD_STATE"
         return 0
     fi
+    ensure_self_update_cron
     while [ ! -f "$BOOT_MARKER" ] && [ "$grace" -lt 90 ]; do
         sleep 5; grace=$((grace+5))
     done
@@ -4812,7 +4815,7 @@ do_start(){
         log_msg "  sizes: amneziawg-go=$(elf_arch "$AWG_GO") awg=$(elf_arch "$AWG_BIN")"
         log_msg "  Likely an interrupted update or a failing USB drive left them truncated to 0"
         log_msg "  bytes (e.g. a power-cycle mid-opkg + e2fsck). Fix: reinstall the package —"
-        log_msg "    curl -sfL https://raw.githubusercontent.com/william-aqn/asuswrt-merlin-amneziawg/main/install-online.sh | sh"
+        log_msg "    curl -sfL https://raw.githubusercontent.com/VolkovIlia/asuswrt-merlin-amneziawg/main/install-online.sh | sh"
         log_msg "  or, if you kept the .ipk: opkg install --force-reinstall <pkg>.ipk"
         update_status; release_lock; return 1
     fi
@@ -5953,6 +5956,7 @@ do_install_page(){
     nvram get rc_support | grep -q am_addons || { log_msg "ERROR: Addons not supported"; return 1; }
 
     mkdir -p "$ADDON_DIR"
+    ensure_self_update_cron
     [ "$(readlink -f "$0")" != "$(readlink -f "$ADDON_DIR/amneziawg.sh")" ] && cp "$0" "$ADDON_DIR/amneziawg.sh"
     chmod +x "$ADDON_DIR/amneziawg.sh"
 
@@ -6107,6 +6111,7 @@ do_mount_ui(){
 
 do_uninstall(){
     do_stop user   # user intent: remove the watchdog cron too
+    cru d awg_self_update 2>/dev/null
 
     # AWG-server role first (its own daemon awgs-go, firewall rules, crons, status files).
     # 'stop user' mirrors the client semantics: deliberate stop -> drop the server crons too.
@@ -6637,7 +6642,7 @@ awg_resolve_version(){
 }
 
 check_update(){
-    local repo="william-aqn/asuswrt-merlin-amneziawg"
+    local repo="VolkovIlia/asuswrt-merlin-amneziawg"
     local latest
     latest=$(awg_resolve_version "$repo")
     if [ -z "$latest" ]; then
@@ -6647,6 +6652,38 @@ check_update(){
     local update=false
     [ "$latest" != "$AWG_VERSION" ] && update=true
     echo "{\"current\":\"$AWG_VERSION\",\"latest\":\"$latest\",\"update\":$update}"
+}
+
+# Daily addon self-update cron (05:30). Registered on boot, install and every firewall setup,
+# independent of whether the client tunnel runs; awg_addon_autoupdate=0 drops it.
+ensure_self_update_cron(){
+    if [ "$(get_setting awg_addon_autoupdate)" = "0" ]; then
+        cru d awg_self_update 2>/dev/null
+    else
+        cru a awg_self_update "30 5 * * * '$ADDON_DIR/amneziawg.sh' auto_update"
+    fi
+}
+
+# Unattended daily self-update (cron awg_self_update). Opt-out: awg_addon_autoupdate=0.
+# do_update deliberately leaves the client tunnel stopped ("Start VPN from the UI"); an
+# unattended run must not strand the user without VPN, so the tunnel is restarted through
+# the NEWLY installed script when it was up before the update.
+do_auto_update(){
+    [ "$(get_setting awg_addon_autoupdate)" = "0" ] && return 0
+    local latest
+    latest=$(awg_resolve_version "$AWG_REPO")
+    [ -n "$latest" ] || { log_msg "Auto-update: cannot resolve latest version"; return 1; }
+    [ "$latest" = "$AWG_VERSION" ] && return 0
+    local was_up=0
+    ip link show "$IFACE" >/dev/null 2>&1 && was_up=1
+    log_msg "Auto-update: v$AWG_VERSION -> v$latest (tunnel up=$was_up)"
+    if ! do_update "$latest"; then
+        log_msg "Auto-update: update failed"
+        [ "$was_up" = 1 ] && "$ADDON_DIR/amneziawg.sh" start
+        return 1
+    fi
+    [ "$was_up" = 1 ] && "$ADDON_DIR/amneziawg.sh" start
+    log_msg "Auto-update: done"
 }
 
 # Install a ready .ipk at $1 (human label $2, e.g. "v1.2.3" or "uploaded package").
@@ -6677,7 +6714,7 @@ finalize_ipk_install(){
         else
             log_msg "  Is the Entware USB mounted? (/opt/bin/opkg missing)."
         fi
-        log_msg "  Update once over SSH to break the loop: curl -sfL https://raw.githubusercontent.com/william-aqn/asuswrt-merlin-amneziawg/main/install-online.sh | sh"
+        log_msg "  Update once over SSH to break the loop: curl -sfL https://raw.githubusercontent.com/VolkovIlia/asuswrt-merlin-amneziawg/main/install-online.sh | sh"
         rm -f "$tmp"
         update_status; return 1
     fi
@@ -6765,7 +6802,7 @@ finalize_ipk_install(){
         [ -n "$_reout" ] && log_msg "  opkg: $(echo "$_reout" | tr '\n' '|')"
         if [ ! -s "$AWG_GO" ] || [ ! -s "$AWG_BIN" ]; then
             log_msg "Update: ERROR install left binaries truncated (amneziawg-go=$(elf_arch "$AWG_GO") awg=$(elf_arch "$AWG_BIN")) — likely an interrupted write on a low-RAM box or a failing USB drive."
-            log_msg "  Reinstall to recover: curl -sfL https://raw.githubusercontent.com/william-aqn/asuswrt-merlin-amneziawg/main/install-online.sh | sh"
+            log_msg "  Reinstall to recover: curl -sfL https://raw.githubusercontent.com/VolkovIlia/asuswrt-merlin-amneziawg/main/install-online.sh | sh"
             rm -f "$tmp" /tmp/.awg_no_autostart
             if [ -d "$geo_bak" ]; then mkdir -p "$AWG_DIR"; mv "$geo_bak" "$GEO_DIR" 2>/dev/null; fi
             conn_history_restore
@@ -6885,7 +6922,7 @@ do_manual_install(){
 }
 
 do_update(){
-    local repo="william-aqn/asuswrt-merlin-amneziawg"
+    local repo="VolkovIlia/asuswrt-merlin-amneziawg"
     # "Update via VPN" bind, resolved while the tunnel is still up (do_update stops it only
     # later, in finalize_ipk_install — every download below happens before that).
     local awg_bind=$(awg_dl_iface_opt update)
@@ -7264,6 +7301,7 @@ case "$1" in
     diag|diagnostics) do_diag ;;
     update_geo)     update_geo_lists; do_firewall_restart; update_status ;;
     check_update)   check_update ;;
+    auto_update)    do_auto_update ;;
     update)         do_update "$2" ;;
     manual_install) do_manual_install ;;
     watchdog)       do_watchdog ;;

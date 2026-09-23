@@ -1386,7 +1386,7 @@ function initial(){
                 <!-- Footer: copyright (DCRM) -->
                 <div style="display:flex; align-items:center; flex-wrap:wrap; gap:2px 10px; font-size:11px; opacity:0.55; margin-top:8px;">
                     <span style="margin-left:auto; text-align:right;">
-                        <a href="https://github.com/william-aqn/asuswrt-merlin-amneziawg" target="_blank" style="text-decoration:none;">&copy; DCRM</a>
+                        <a href="https://github.com/VolkovIlia/asuswrt-merlin-amneziawg" target="_blank" style="text-decoration:none;">&copy; DCRM</a>
                     </span>
                 </div>
 
