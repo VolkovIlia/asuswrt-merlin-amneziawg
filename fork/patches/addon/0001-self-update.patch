@@ -1,51 +1,27 @@
 diff --git a/addon/amneziawg.sh b/addon/amneziawg.sh
-index 10704b0..f4bbe62 100755
+index 588dc70..af01aea 100755
 --- a/addon/amneziawg.sh
 +++ b/addon/amneziawg.sh
-@@ -5,6 +5,7 @@
- # =============================================================
- 
- AWG_VERSION="1.5.22"
-+AWG_REPO="william-aqn/asuswrt-merlin-amneziawg"
- ADDON_DIR="/jffs/addons/amneziawg"
- AWG_DIR="/opt/amneziawg"
- CONF="$AWG_DIR/awg0.conf"
-@@ -3305,6 +3306,7 @@ setup_firewall(){
-         cru a awg_geo_update "0 4 * * * '$ADDON_DIR/amneziawg.sh' update_geo"
-     fi
+@@ -4110,2 +4110,3 @@ setup_firewall(){
      cru a awg_watchdog "*/5 * * * * '$ADDON_DIR/amneziawg.sh' watchdog"
 +    ensure_self_update_cron
      # Background status refresh (every minute) so the UI peer table — handshake age and the
-     # cumulative RX/TX counters — stays current WITHOUT a user action. The web page only re-reads
-     # the static awg_status.htm; nothing else regenerated it between actions, so it used to freeze.
-@@ -4701,6 +4703,7 @@ do_boot_guard(){
-         echo "stand down: no /opt/etc/init.d/S99amneziawg after ${waited}s (Entware not mounted or package removed)" > "$BOOT_GUARD_STATE"
-         return 0
+@@ -5828,2 +5829,3 @@ do_boot_guard(){
      fi
 +    ensure_self_update_cron
      while [ ! -f "$BOOT_MARKER" ] && [ "$grace" -lt 90 ]; do
-         sleep 5; grace=$((grace+5))
-     done
-@@ -5953,6 +5956,7 @@ do_install_page(){
-     nvram get rc_support | grep -q am_addons || { log_msg "ERROR: Addons not supported"; return 1; }
- 
+@@ -7360,2 +7362,3 @@ do_install_page(){
      mkdir -p "$ADDON_DIR"
 +    ensure_self_update_cron
      [ "$(readlink -f "$0")" != "$(readlink -f "$ADDON_DIR/amneziawg.sh")" ] && cp "$0" "$ADDON_DIR/amneziawg.sh"
-     chmod +x "$ADDON_DIR/amneziawg.sh"
- 
-@@ -6107,6 +6111,7 @@ do_mount_ui(){
- 
- do_uninstall(){
+@@ -7518,2 +7521,3 @@ do_uninstall(){
      do_stop user   # user intent: remove the watchdog cron too
 +    cru d awg_self_update 2>/dev/null
  
-     # AWG-server role first (its own daemon awgs-go, firewall rules, crons, status files).
-     # 'stop user' mirrors the client semantics: deliberate stop -> drop the server crons too.
-@@ -6649,6 +6654,38 @@ check_update(){
-     echo "{\"current\":\"$AWG_VERSION\",\"latest\":\"$latest\",\"update\":$update}"
- }
+@@ -8067,2 +8071,36 @@ check_update(){
  
++AWG_REPO="william-aqn/asuswrt-merlin-amneziawg"
++
 +# Daily addon self-update cron (05:30). Registered on boot, install and every firewall setup,
 +# independent of whether the client tunnel runs; awg_addon_autoupdate=0 drops it.
 +ensure_self_update_cron(){
@@ -79,13 +55,7 @@ index 10704b0..f4bbe62 100755
 +}
 +
  # Install a ready .ipk at $1 (human label $2, e.g. "v1.2.3" or "uploaded package").
- # Shared by do_update (after a verified download) and do_manual_install (after a
- # verified upload). Preserves geo lists across the opkg upgrade, stops the VPN, installs,
-@@ -7264,6 +7301,7 @@ case "$1" in
-     diag|diagnostics) do_diag ;;
-     update_geo)     update_geo_lists; do_firewall_restart; update_status ;;
+@@ -8669,2 +8707,3 @@ case "$1" in
      check_update)   check_update ;;
 +    auto_update)    do_auto_update ;;
      update)         do_update "$2" ;;
-     manual_install) do_manual_install ;;
-     watchdog)       do_watchdog ;;
