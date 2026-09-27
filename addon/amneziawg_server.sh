@@ -47,6 +47,8 @@ DIAG_FILE="/www/user/awgs_diag.htm"
 LOCKDIR="/tmp/.awgs_lock"
 DAEMON_LOG="/tmp/awgs_daemon.log"
 DAEMON_RC="/tmp/awgs_daemon.rc"
+DAEMON_TUNE="/tmp/awgs_daemon.tune"
+DAEMON_CRASH="/tmp/awgs_daemon.crash"
 STARTING_FLAG="/tmp/.awgs_starting"
 STOPPING_FLAG="/tmp/.awgs_stopping"
 # The server daemon runs under its OWN process name (hardlink to the same binary): the
@@ -246,7 +248,8 @@ srv_generate_config(){
         _ic=$((_ic + 1))
     done
     if [ -n "$initdata" ]; then
-        decoded=$(echo "$initdata" | base64 -d 2>/dev/null)
+        b64d_init
+        decoded=$(echo "$initdata" | b64d)   # the client lib's fallback chain (no base64 on stock Merlin)
         i1=$(echo "$decoded" | awk '/^I1 /{sub(/^[^=]+=[ ]?/,"");print;exit}')
         i2=$(echo "$decoded" | awk '/^I2 /{sub(/^[^=]+=[ ]?/,"");print;exit}')
         i3=$(echo "$decoded" | awk '/^I3 /{sub(/^[^=]+=[ ]?/,"");print;exit}')
@@ -302,7 +305,10 @@ srv_generate_config(){
     # RandomTrailers is SYMMETRIC: with it on, the server only ACCEPTS trailered handshakes
     # and always SENDS trailered ones — so every peer must carry `RandomTrailers = on` too
     # (the page writes it into each generated peer config/QR) and needs an AmneziaWG 3.1+
-    # client app. DisableCookies is local: the server just never sends cookie replies.
+    # client app. DisableCookies is local (never mirrored to peers): the server sends no cookie
+    # replies and, since daemon v3.1.20260828 (b5928ef), also skips the whole under-load
+    # MAC2/rate-limit path — handshakes are no longer dropped under load, but there is no
+    # handshake-flood defence at all (see HINT_AWG31_DC_SRV).
     local rt dc awg31=0
     rt=$(get_setting awgs_rt)
     dc=$(get_setting awgs_dc)
@@ -1036,7 +1042,10 @@ srv_update_status(){
     [ "$xray_capture" = "true" ] && ! srv_xray_covers_peers && xray_uncov=true
 
     rm -f "${STATUS_FILE}.tmp" "${STATUS_FILE}".[0-9]* 2>/dev/null
-    cat > "${STATUS_FILE}.$$" << STATUSEOF
+    # '<' leaves as its JSON unicode escape, like the client's status: this .htm goes through the
+    # firmware's ASP evaluator and carries user text (peer names, syslog), where a stray
+    # tag opener would livelock httpd.
+    sed 's/</\\u003c/g' > "${STATUS_FILE}.$$" << STATUSEOF
 {"running":${running},"starting":${starting},"stopping":${stopping},"version":"${AWG_VERSION}","lang":"${pref_lang}","port":"${port}","subnet":"${subnet}","router_ip":"${router_ip}","public_key":"${pubkey}","endpoint_hint":"${ep_hint}","wan_private":$([ "$wan_priv" = "1" ] && echo true || echo false),"port_conflict":$([ "$port_conf" = "1" ] && echo true || echo false),"nat_lan":${nat_lan},"autostart":${autostart},"awg3":$(awg3_supported && echo true || echo false),"awg31":$(awg31_supported && echo true || echo false),"client_running":${client_running},"xray_capture":${xray_capture},"xray_ctl":${xray_ctl},"xray_peers_uncovered":${xray_uncov},"peers":${peers_json},"log":"${log_text}"}
 STATUSEOF
     mv "${STATUS_FILE}.$$" "$STATUS_FILE" 2>/dev/null
@@ -1090,12 +1099,23 @@ do_srv_service_event(){
             do_srv_apply
             ;;
         awgsrvdiag)
-            do_srv_diag > "$DIAG_FILE" 2>&1
+            # Filtered as a stream at this, its one web-served writer (see the client's awgdiag):
+            # an ASP-tag opener in a /www/user .htm livelocks httpd.
+            do_srv_diag 2>&1 | sed 's/<\([%#]\)/< \1/g' > "$DIAG_FILE"
             echo "[DIAG_DONE]" >> "$DIAG_FILE"
             ;;
         awgsrvstatus)  srv_update_status ;;
     esac
 }
+
+# Whitespace in a stored peer name cuts the WHOLE peer store on the pages' settings read-back,
+# and a chunk a pre-1.5.26 page sized by characters reads back cut — rescue both (shared helper,
+# see migrate_server_peers; a one-awk no-op once clean). The same pass also encodes raw spaced
+# CLIENT profile names (migrate_profile_names): this page POSTs every awg_* key as the read-back
+# cut it, so a server-only box would otherwise lose the tails on its first server save. The client
+# dispatch runs it too, but a box serving peers with the client tunnel never started only gets
+# THIS script's crons.
+migrate_server_peers
 
 case "$1" in
     start)            do_srv_start ;;
