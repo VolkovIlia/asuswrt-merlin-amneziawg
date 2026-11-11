@@ -241,7 +241,7 @@ The router can act not only as a client but also as an **AmneziaWG server**: a d
 A dedicated **VPN > AmneziaWG Server** page (the client part is untouched; both roles can stay enabled at the same time):
 
 - **Setup** — **Generate** the server key pair, port (default `51821`, so it doesn't collide with the firmware's built-in WG server), tunnel subnet (default `10.9.0.0/24`), MTU. Obfuscation parameters (`Jc/Jmin/Jmax/S1/S2/H1-H4`, a "Generate random" button) + advanced `I1-I5` signature packets for AWG 2.x (also with a "Generate" button — a unique random signature that camouflages the flow; embedded into every peer config).
-- **Peers** — a device table: name, auto-assigned IP, on/off, **routing policy** (`Direct` / `VPN: all traffic` / any geo policy), **tunnel scope** (all traffic or home network only). Key pairs and PSKs are generated **right in the browser** (Curve25519) — peer private keys never reach the backend.
+- **Peers** — a device table: name, auto-assigned IP, on/off, **routing policy** (`Direct` / `VPN: all traffic` / any geo policy), **tunnel scope** (all traffic or home network only). Curve25519 key pairs and PSKs are generated **right in the browser**. Clicking **Apply** saves peer private keys and PSKs on the router in `/jffs/addons/custom_settings.txt`, so QR codes can be shown and configs downloaded again. The trust model assumes the router administrator has access to these keys.
 - **Config hand-out** — per peer: a **QR code** (own generator, no external CDNs; scanned by the AmneziaWG app), `.conf` download, copy to clipboard.
 - **Per-peer policy (double hop)** — a peer can get the same policy as a LAN device: with `VPN: all traffic` the peer's traffic exits through the **client** tunnel (phone → home → external VPN). Runs on top of the same policy engine. The rules live and die with the client tunnel's firewall: while the client tunnel is down, peer traffic goes straight to the WAN (fail-open; a yellow banner warns about it).
 - **DNS for peers** — the router's dnsmasq by default (home device names and domain Geo work), or custom servers.
@@ -400,7 +400,7 @@ Phone/laptop (peer) --> WAN UDP:51821 --> awgs0 (server) --> br0 (home network)
 | **amneziawg_server.sh** | Server backend: peers, inbound firewall, peer DNS, per-peer policy (reuses `amneziawg.sh` helpers) |
 | **amneziawg_page.asp** | Client web UI (**VPN > AmneziaWG**) |
 | **amneziawg_server_page.asp** | Server web UI (**VPN > AmneziaWG Server**) |
-| **awg_qr.js** | QR code and Curve25519 key generation right in the browser (no external CDNs; peer private keys never leave the page) |
+| **awg_qr.js** | QR code and Curve25519 key generation right in the browser (no external CDNs; keys are saved on the router on Apply for repeated config export) |
 | **amneziawg_widget.js** | The global header widget: an ● AWG status indicator on every firmware page + a mini start/stop panel (served as `/www/user/awg_widget.js`, loaded via `menuTree.js`) |
 
 ## FAQ
@@ -460,7 +460,18 @@ Honest limitations:
 
 **Q: `ipset` prints `Warning: Kernel support protocol versions 6-6 while userspace supports protocol versions 6-7`?**
 
-A: A harmless warning, not an error. The `ipset` tool (both the firmware's `/usr/sbin/ipset` and Entware's `/opt/sbin/ipset`) is built from newer sources and speaks protocol versions 6 and 7, while the ipset module in the router's old kernel (4.1.51) implements only version 6. The ranges overlap at version 6, so the tool automatically uses it -- everything works as intended. Nothing to do; geo routing via ipset (`awg_dst` and the geo ipsets) fully works on version 6.
+A: A harmless warning, not an error. The `ipset` tool (both the firmware's `/usr/sbin/ipset` and Entware's `/opt/sbin/ipset`) is built from newer sources and speaks protocol versions 6 and 7, while the ipset module in the router's old kernel (4.1.27 / 4.1.51) implements only version 6. The ranges overlap at version 6, so the tool automatically uses it -- everything works as intended. Nothing to do; geo routing via ipset (`awg_dst` and the geo ipsets) fully works on version 6.
+
+**Q: The journal says `Go runtime: GOMEMLIMIT=… GOGC=50 + buffer pool capped at …` -- is the router out of memory, did the lists fail to load?**
+
+A: No. It is the daemon's normal garbage-collector profile on routers with less than 768 MB of RAM (or with strict `vm.overcommit`): it keeps the daemon from crashing under heavy load and affects nothing else. The address lists live in kernel ipsets, not in the daemon's memory. Whether they loaded is shown by the journal line `Firewall configured: N IPs, M domains` and by the diagnostics (`geo ipsets`).
+
+**Q: The status says «Connected», the handshake is there, but sites do not open through the VPN?**
+
+A: Press «Diagnostics». Since 1.5.30 the report tests the tunnel live (the `live probes` section: ping, HTTPS, a download and an upload through the tunnel from the router itself) and ends with a `VERDICT` line:
+- nothing comes back through the tunnel -- the router's setup is not the cause; look at the server or the provider (and try the same config in the provider's own client);
+- small requests pass, full-size packets do not -- lower the profile MTU (1280, for example) and restart the tunnel;
+- everything passes from the router -- the cause is on the device's side: its policy, its own DoH/DoT past the router, IPv6, a DPI-bypass tool or a firewall on the device itself. The per-device counters of marked packets are in the same report, in the routing section.
 
 ## Authors
 
